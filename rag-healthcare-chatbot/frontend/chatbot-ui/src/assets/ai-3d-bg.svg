@@ -1,0 +1,53 @@
+<svg width="1600" height="1200" viewBox="0 0 1600 1200" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <radialGradient id="sphereA" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(1132 338) rotate(126.562) scale(333.923)">
+      <stop stop-color="#FFFFFF" stop-opacity="0.95"/>
+      <stop offset="0.27" stop-color="#7DD3FC" stop-opacity="0.78"/>
+      <stop offset="0.64" stop-color="#2563EB" stop-opacity="0.42"/>
+      <stop offset="1" stop-color="#0F172A" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="sphereB" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(432 860) rotate(126.562) scale(305.782)">
+      <stop stop-color="#FFFFFF" stop-opacity="0.88"/>
+      <stop offset="0.28" stop-color="#5EEAD4" stop-opacity="0.72"/>
+      <stop offset="0.66" stop-color="#0F766E" stop-opacity="0.38"/>
+      <stop offset="1" stop-color="#0F172A" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="plate" x1="633" y1="254" x2="1093" y2="736" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#E0F2FE" stop-opacity="0.82"/>
+      <stop offset="1" stop-color="#BFDBFE" stop-opacity="0.12"/>
+    </linearGradient>
+    <linearGradient id="wire" x1="338" y1="342" x2="1281" y2="913" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#7DD3FC" stop-opacity="0.52"/>
+      <stop offset="1" stop-color="#5EEAD4" stop-opacity="0.18"/>
+    </linearGradient>
+    <filter id="blurGlow" x="116" y="56" width="1368" height="1120" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feGaussianBlur stdDeviation="60"/>
+    </filter>
+  </defs>
+  <g filter="url(#blurGlow)" opacity="0.5">
+    <circle cx="1128" cy="338" r="224" fill="url(#sphereA)"/>
+    <circle cx="452" cy="854" r="208" fill="url(#sphereB)"/>
+  </g>
+  <circle cx="1128" cy="338" r="170" fill="url(#sphereA)"/>
+  <circle cx="452" cy="854" r="156" fill="url(#sphereB)"/>
+  <path d="M728 242L1088 348L898 670L520 562L728 242Z" fill="url(#plate)" fill-opacity="0.52"/>
+  <path d="M716 270L1058 370L880 642L554 548L716 270Z" stroke="#DDF4FF" stroke-opacity="0.42" stroke-width="2"/>
+  <g opacity="0.28" stroke="url(#wire)" stroke-width="2">
+    <path d="M284 632C420 516 598 434 760 430C980 424 1144 536 1304 732"/>
+    <path d="M242 796C430 674 642 610 820 626C984 640 1132 732 1278 882"/>
+    <path d="M396 286C580 358 728 446 838 568C958 702 1046 812 1236 934"/>
+  </g>
+  <g opacity="0.92">
+    <circle cx="336" cy="628" r="7" fill="#7DD3FC"/>
+    <circle cx="488" cy="526" r="5" fill="#FFFFFF"/>
+    <circle cx="664" cy="442" r="8" fill="#5EEAD4"/>
+    <circle cx="860" cy="426" r="6" fill="#FFFFFF"/>
+    <circle cx="1036" cy="480" r="7" fill="#60A5FA"/>
+    <circle cx="1190" cy="596" r="8" fill="#FFFFFF"/>
+    <circle cx="1258" cy="748" r="7" fill="#5EEAD4"/>
+    <circle cx="1096" cy="820" r="5" fill="#FFFFFF"/>
+    <circle cx="830" cy="772" r="8" fill="#7DD3FC"/>
+    <circle cx="618" cy="720" r="6" fill="#FFFFFF"/>
+    <circle cx="476" cy="836" r="8" fill="#5EEAD4"/>
+  </g>
+</svg>

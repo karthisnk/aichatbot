@@ -1,0 +1,23 @@
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: Georgia, "Times New Roman", serif;
+  background: var(--bg, #08111f);
+  color: var(--text, #eef4ff);
+  overflow: hidden;
+  transition: background-color 220ms ease, color 220ms ease;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+button,
+input {
+  font: inherit;
+}

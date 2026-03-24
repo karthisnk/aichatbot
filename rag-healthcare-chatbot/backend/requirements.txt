@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+chromadb==1.5.5
+sentence-transformers
+requests
+pydantic
+PyMuPDF
+Pillow
+pytesseract
