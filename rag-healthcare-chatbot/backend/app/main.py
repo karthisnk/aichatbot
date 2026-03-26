@@ -1,10 +1,17 @@
 import json
+import re
+from functools import lru_cache
 from contextlib import asynccontextmanager
+from pathlib import Path
 
+import fitz
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi import Response
 from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 
+from app.config import PROCESSED_DATA_DIR, RAW_DATA_DIR
 from app.models.feedback import FeedbackRequest
 from app.models.request import ChatRequest
 from app.rag.pipeline import RAGPipeline
@@ -30,14 +37,174 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+  allow_origins=[
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "http://localhost:3001",
+    "http://127.0.0.1:3001",
+    "http://localhost:3002",
+    "http://127.0.0.1:3002",
+  ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.mount(
+  "/kb-images",
+  StaticFiles(directory=str(Path(PROCESSED_DATA_DIR)), check_dir=False),
+  name="kb-images",
+)
 
 rag = RAGPipeline()
 feedback_store = FeedbackStore()
+
+
+def _slugify(value: str) -> str:
+  return re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
+
+
+@lru_cache(maxsize=1)
+def _raw_pdf_lookup():
+  raw_dir = Path(RAW_DATA_DIR)
+  lookup = {}
+  if not raw_dir.exists():
+    return lookup
+
+  for pdf_path in raw_dir.glob("*.pdf"):
+    lookup[_slugify(pdf_path.stem)] = pdf_path
+  return lookup
+
+
+def _resolve_pdf_for_collection(collection: str):
+  key = _slugify(collection)
+  if not key:
+    return None
+
+  for stem_key, pdf_path in _raw_pdf_lookup().items():
+    if key in stem_key or stem_key in key:
+      return pdf_path
+  return None
+
+
+def _section_search_terms(section: str):
+  cleaned = str(section or "").strip()
+  if not cleaned:
+    return []
+
+  variants = {
+    cleaned,
+    cleaned.replace("–", "-"),
+    cleaned.replace("&", "and"),
+    cleaned.replace("–", "-").replace("&", "and"),
+  }
+  return [value for value in variants if value]
+
+
+def _find_section_anchor(page, section: str):
+  for term in _section_search_terms(section):
+    rects = page.search_for(term)
+    if rects:
+      return min(rects, key=lambda rect: rect.y0)
+
+  tokens = [token for token in re.findall(r"[a-z0-9]+", str(section or "").lower()) if len(token) > 2]
+  if not tokens:
+    return None
+
+  best_rect = None
+  best_score = 0
+  for block in page.get_text("blocks"):
+    x0, y0, x1, y1, text, *_ = block
+    normalized = " ".join(str(text or "").lower().split())
+    score = sum(1 for token in tokens if token in normalized)
+    if score > best_score:
+      best_score = score
+      best_rect = fitz.Rect(x0, y0, x1, y1)
+
+  return best_rect if best_score >= min(2, len(tokens)) else None
+
+
+def _section_tokens(section: str):
+  tokens = [token for token in re.findall(r"[a-z0-9]+", str(section or "").lower()) if len(token) > 2]
+  stop_words = {
+    "last",
+    "days",
+    "page",
+    "figure",
+    "card",
+    "section",
+    "clicking",
+    "shown",
+    "display",
+  }
+  return [token for token in tokens if token not in stop_words]
+
+
+def _image_context_score(page, rect, section: str):
+  tokens = _section_tokens(section)
+  if not tokens:
+    return 0
+
+  expanded = fitz.Rect(
+    rect.x0 - 24,
+    rect.y0 - 120,
+    rect.x1 + 24,
+    rect.y1 + 120,
+  ) & page.rect
+
+  nearby_text = " ".join(
+    str(block[4] or "")
+    for block in page.get_text("blocks", clip=expanded)
+  ).lower()
+  if not nearby_text:
+    return 0
+
+  score = 0
+  for token in tokens:
+    if token in nearby_text:
+      score += 1
+
+  return score
+
+
+def _find_best_figure_region(document, page: int, section: str):
+  candidate_pages = []
+  for candidate in (page, page + 1, page - 1):
+    if 1 <= candidate <= len(document) and candidate not in candidate_pages:
+      candidate_pages.append(candidate)
+
+  best_match = None
+  best_score = float("-inf")
+  for candidate in candidate_pages:
+    pdf_page = document.load_page(candidate - 1)
+    anchor = _find_section_anchor(pdf_page, section)
+    image_rects = []
+    for image in pdf_page.get_images(full=True):
+      xref = image[0]
+      image_rects.extend(pdf_page.get_image_rects(xref))
+
+    image_rects = [rect for rect in image_rects if rect.width >= 120 and rect.height >= 90]
+    if not image_rects:
+      continue
+
+    for rect in image_rects:
+      context_score = _image_context_score(pdf_page, rect, section)
+      area_score = (rect.width * rect.height) / 10000.0
+
+      if anchor is not None:
+        vertical_distance = abs(rect.y0 - anchor.y1)
+        if rect.y0 >= anchor.y1 - 16:
+          proximity = 2.5
+        else:
+          proximity = 0.0
+        score = (context_score * 20.0) + proximity - (vertical_distance / 1200.0) + area_score
+      else:
+        score = (context_score * 20.0) + area_score
+
+      if score > best_score:
+        best_score = score
+        best_match = (candidate, rect + (-10, -10, 10, 10))
+
+  return best_match
 
 
 @app.post("/chat")
@@ -89,6 +256,76 @@ def save_dislike(request: FeedbackRequest):
         created_at=request.created_at,
     )
     return {"status": "saved", "feedback": "dislike"}
+
+
+@app.get("/kb-pages/{collection}/{page}")
+def kb_page_snapshot(collection: str, page: int, zoom: float = 1.7):
+    if page < 1:
+      raise HTTPException(status_code=400, detail="Page must be >= 1.")
+    if zoom <= 0 or zoom > 3:
+      raise HTTPException(status_code=400, detail="Zoom must be > 0 and <= 3.")
+
+    pdf_path = _resolve_pdf_for_collection(collection)
+    if not pdf_path:
+      raise HTTPException(
+        status_code=404,
+        detail=f"No source PDF found for collection '{collection}'.",
+      )
+
+    try:
+      with fitz.open(pdf_path) as document:
+        if page > len(document):
+          raise HTTPException(
+            status_code=404,
+            detail=f"Page {page} is out of bounds for '{pdf_path.name}'.",
+          )
+
+        pdf_page = document.load_page(page - 1)
+        pixmap = pdf_page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
+        return Response(content=pixmap.tobytes("png"), media_type="image/png")
+    except HTTPException:
+      raise
+    except Exception as exc:
+      raise HTTPException(status_code=500, detail="Failed to render PDF page image.") from exc
+
+
+@app.get("/kb-figures/{collection}/{page}")
+def kb_figure_snapshot(collection: str, page: int, section: str = "", zoom: float = 2.2):
+    if page < 1:
+      raise HTTPException(status_code=400, detail="Page must be >= 1.")
+    if zoom <= 0 or zoom > 4:
+      raise HTTPException(status_code=400, detail="Zoom must be > 0 and <= 4.")
+
+    pdf_path = _resolve_pdf_for_collection(collection)
+    if not pdf_path:
+      raise HTTPException(
+        status_code=404,
+        detail=f"No source PDF found for collection '{collection}'.",
+      )
+
+    try:
+      with fitz.open(pdf_path) as document:
+        match = _find_best_figure_region(document, page=page, section=section)
+        if match:
+          target_page, clip_rect = match
+          pdf_page = document.load_page(target_page - 1)
+          clip_rect = clip_rect & pdf_page.rect
+          pixmap = pdf_page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), clip=clip_rect, alpha=False)
+          return Response(content=pixmap.tobytes("png"), media_type="image/png")
+
+        if page > len(document):
+          raise HTTPException(
+            status_code=404,
+            detail=f"Page {page} is out of bounds for '{pdf_path.name}'.",
+          )
+
+        pdf_page = document.load_page(page - 1)
+        pixmap = pdf_page.get_pixmap(matrix=fitz.Matrix(1.8, 1.8), alpha=False)
+        return Response(content=pixmap.tobytes("png"), media_type="image/png")
+    except HTTPException:
+      raise
+    except Exception as exc:
+      raise HTTPException(status_code=500, detail="Failed to render figure image.") from exc
 
 
 @app.get("/chroma/collections")

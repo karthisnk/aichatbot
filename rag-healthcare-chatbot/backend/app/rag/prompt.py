@@ -4,22 +4,61 @@ from app.config import PROMPT_CHUNK_CHAR_LIMIT, PROMPT_MAX_CHUNKS
 
 
 class PromptBuilder:
-    def build(self, query, chunks, history=None):
+    def build(self, query, chunks, history=None, detailed=False, max_chunks=None, chunk_char_limit=None):
         history = history or []
         history_block = self._build_history_block(history)
-        context_block = self._build_context_block(chunks[:PROMPT_MAX_CHUNKS])
+        max_chunks = max_chunks or PROMPT_MAX_CHUNKS
+        chunk_char_limit = chunk_char_limit or PROMPT_CHUNK_CHAR_LIMIT
+        context_block = self._build_context_block(
+            chunks[:max_chunks],
+            chunk_char_limit=chunk_char_limit,
+        )
+
+        if detailed:
+            return f"""
+You are a healthcare application assistant.
+
+Answer only from the provided context.
+The user asked for a detailed explanation, so provide complete step-by-step guidance.
+Do not summarize into a short answer.
+Capture all important actionable details supported by context, including sequence, options, warnings, and required fields.
+Use readable Markdown structure:
+- Start with a short heading in bold.
+- Use numbered steps for the main flow.
+- Under each step, add bullet points for exact actions and clarifications.
+- Keep each sentence short and readable.
+- If there are alternatives or edge cases, add a separate bullet section.
+Do not produce one long paragraph.
+Do not mention figure numbers, screenshots, image labels, or references like "see figure".
+If some context is missing, explicitly say what is unavailable and continue with what is supported.
+If nothing is supported, say:
+"I could not find this in the knowledge base. Please check with the L3 administration team."
+
+Previous conversation:
+{history_block}
+
+Context:
+{context_block}
+
+Current question:
+{query}
+
+Answer:
+"""
 
         return f"""
 You are a healthcare application assistant.
 
 Answer only from the provided context.
 Keep the answer concise, direct, and practical, but include enough detail to be useful.
-Use numbered steps when the context describes a procedure.
 Rewrite manual-style content into clear user-facing instructions.
+Format the main response as short bullet points (2 to 5 bullets).
+Do not use generic numbered step-by-step formatting unless the user explicitly asks for steps.
+Each bullet should be one practical action or insight, written in plain user language.
 Do not mention figure numbers, screenshots, image labels, or references like "see figure" or "shown above".
 Make the answer fully understandable on its own, even if the user cannot see the manual images.
 When the source mentions a menu or button, describe where to find it in simple words.
-Use short paragraphs or short lists only when needed.
+Use short paragraphs only when a list is not suitable.
 If some details are especially important, highlight only a few key words or phrases using Markdown bold like **this**.
 Do not overuse bold formatting.
 If the answer is not supported by the context, say:
@@ -52,7 +91,7 @@ Answer:
 
         return "\n".join(formatted_turns) if formatted_turns else "No previous conversation."
 
-    def _build_context_block(self, chunks):
+    def _build_context_block(self, chunks, chunk_char_limit=PROMPT_CHUNK_CHAR_LIMIT):
         if not chunks:
             return "No context found."
 
@@ -68,7 +107,7 @@ Answer:
             if page is not None:
                 header += f" | page={page}"
 
-            formatted_chunks.append(f"{header}\n{self._limit_text(text, PROMPT_CHUNK_CHAR_LIMIT)}")
+            formatted_chunks.append(f"{header}\n{self._limit_text(text, chunk_char_limit)}")
 
         return "\n\n".join(formatted_chunks)
 

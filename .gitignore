@@ -1,0 +1,35 @@
+# OS and editor
+.DS_Store
+.vscode/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Node / frontend
+node_modules/
+*/node_modules/
+build/
+dist/
+
+# Logs and runtime artifacts
+*.log
+logs/
+
+# Local databases and vector runtime state
+# *.sqlite3
+# chroma/
+
+# Local env files
+.env
+.env.*
+!.env.example

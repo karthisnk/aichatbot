@@ -226,6 +226,65 @@ function App() {
       minute: "2-digit",
     }).format(new Date(value));
 
+  const getRenderableImageSources = (sources) => {
+    if (!Array.isArray(sources) || !sources.length) {
+      return [];
+    }
+
+    const seen = new Set();
+    const renderable = [];
+
+    for (const source of sources) {
+      const imageUrl = String(source?.image_url || "").trim();
+      if (!imageUrl) {
+        continue;
+      }
+
+      const absoluteUrl = imageUrl.startsWith("http")
+        ? imageUrl
+        : `http://127.0.0.1:8000${imageUrl.startsWith("/") ? imageUrl : `/${imageUrl}`}`;
+
+      if (seen.has(absoluteUrl)) {
+        continue;
+      }
+      seen.add(absoluteUrl);
+
+      renderable.push({
+        url: absoluteUrl,
+        section: source?.section || "Reference image",
+        page: source?.page,
+      });
+    }
+
+    if (renderable.length) {
+      return renderable.slice(0, 2);
+    }
+
+    for (const source of sources) {
+      const page = Number(source?.page);
+      const collection = String(source?.collection || "").trim();
+      if (!collection || !Number.isFinite(page) || page < 1) {
+        continue;
+      }
+
+      const section = encodeURIComponent(String(source?.section || ""));
+      const url = `http://127.0.0.1:8000/kb-figures/${encodeURIComponent(collection)}/${page}?section=${section}`;
+      if (seen.has(url)) {
+        continue;
+      }
+      seen.add(url);
+
+      renderable.push({
+        url,
+        section: source?.section || `Page ${page}`,
+        page,
+      });
+      break;
+    }
+
+    return renderable;
+  };
+
   const submitFeedback = async (message, feedback) => {
     if (!message?.sourceQuestion || message.feedback === feedback) return;
 
@@ -532,67 +591,84 @@ function App() {
                 </button>
               </div>
             ) : (
-              messages.map((m, i) => (
-                <div
-                  key={m.id}
-                  className={`message-row ${m.role}`}
-                  style={{ animationDelay: `${i * 90}ms` }}
-                >
-                  <div className="message-label">
-                    <span className="message-author">
-                      <span className={`message-avatar ${m.role}`} />
-                      {m.role === "user" ? "You" : "Assistant"}
-                    </span>
-                    <span className="message-time">{formatTime(m.createdAt)}</span>
-                  </div>
-                  <div className="message-bubble">
-                    {m.text}
-                    {m.role === "bot" && m.routing?.app ? (
-                      <div className="message-actions">
-                        <span className="message-actions-label">
-                          Routed to {m.routing.app}
-                        </span>
-                        {Array.isArray(m.sources) && m.sources.length ? (
-                          <span className="message-actions-label">
-                            {m.sources.length} source{m.sources.length === 1 ? "" : "s"}
-                          </span>
-                        ) : null}
-                      </div>
-                    ) : null}
-                    {m.role === "bot" && m.isComplete && m.text.trim() ? (
-                      <div className="message-actions">
-                        <span className="message-actions-label">Rate response</span>
-                        <div className="reaction-group">
-                        <button
-                          type="button"
-                          className={`feedback-button ${
-                            m.feedback === "like" ? "active like" : ""
-                          }`}
-                          onClick={() => submitFeedback(m, "like")}
-                          aria-pressed={m.feedback === "like"}
-                          aria-label="Like response"
-                          title="Like response"
-                        >
-                          <FeedbackIcon type="like" />
-                        </button>
-                        <button
-                          type="button"
-                          className={`feedback-button ${
-                            m.feedback === "dislike" ? "active dislike" : ""
-                          }`}
-                          onClick={() => submitFeedback(m, "dislike")}
-                          aria-pressed={m.feedback === "dislike"}
-                          aria-label="Dislike response"
-                          title="Dislike response"
-                        >
-                          <FeedbackIcon type="dislike" />
-                        </button>
+              messages.map((m, i) => {
+                const imageSources = getRenderableImageSources(m.sources);
+
+                return (
+                  <div
+                    key={m.id}
+                    className={`message-row ${m.role}`}
+                    style={{ animationDelay: `${i * 90}ms` }}
+                  >
+                    <div className="message-label">
+                      <span className="message-author">
+                        <span className={`message-avatar ${m.role}`} />
+                        {m.role === "user" ? "You" : "Assistant"}
+                      </span>
+                      <span className="message-time">{formatTime(m.createdAt)}</span>
+                    </div>
+                    <div className="message-bubble">
+                      {m.text}
+                      {m.role === "bot" && imageSources.length ? (
+                        <div className="source-image-grid" aria-label="Reference images">
+                          {imageSources.map((item) => (
+                            <figure key={item.url} className="source-image-card">
+                              <img src={item.url} alt={item.section} loading="lazy" />
+                              <figcaption>
+                                <span>{item.section}</span>
+                                {item.page ? <span>Page {item.page}</span> : null}
+                              </figcaption>
+                            </figure>
+                          ))}
                         </div>
-                      </div>
-                    ) : null}
+                      ) : null}
+                      {m.role === "bot" && m.routing?.app ? (
+                        <div className="message-actions">
+                          <span className="message-actions-label">
+                            Routed to {m.routing.app}
+                          </span>
+                          {Array.isArray(m.sources) && m.sources.length ? (
+                            <span className="message-actions-label">
+                              {m.sources.length} source{m.sources.length === 1 ? "" : "s"}
+                            </span>
+                          ) : null}
+                        </div>
+                      ) : null}
+                      {m.role === "bot" && m.isComplete && m.text.trim() ? (
+                        <div className="message-actions">
+                          <span className="message-actions-label">Rate response</span>
+                          <div className="reaction-group">
+                            <button
+                              type="button"
+                              className={`feedback-button ${
+                                m.feedback === "like" ? "active like" : ""
+                              }`}
+                              onClick={() => submitFeedback(m, "like")}
+                              aria-pressed={m.feedback === "like"}
+                              aria-label="Like response"
+                              title="Like response"
+                            >
+                              <FeedbackIcon type="like" />
+                            </button>
+                            <button
+                              type="button"
+                              className={`feedback-button ${
+                                m.feedback === "dislike" ? "active dislike" : ""
+                              }`}
+                              onClick={() => submitFeedback(m, "dislike")}
+                              aria-pressed={m.feedback === "dislike"}
+                              aria-label="Dislike response"
+                              title="Dislike response"
+                            >
+                              <FeedbackIcon type="dislike" />
+                            </button>
+                          </div>
+                        </div>
+                      ) : null}
+                    </div>
                   </div>
-                </div>
-              ))
+                );
+              })
             )}
 
             {isSending ? (
