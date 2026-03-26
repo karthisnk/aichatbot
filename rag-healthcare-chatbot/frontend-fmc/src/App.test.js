@@ -1,8 +1,16 @@
 import { render, screen } from '@testing-library/react';
 import App from './App';
 
-test('renders learn react link', () => {
+jest.mock('react-markdown', () => ({ children }) => children);
+jest.mock('remark-gfm', () => () => null);
+jest.mock('remark-gemoji', () => () => null);
+jest.mock('lottie-web', () => ({
+  loadAnimation: () => ({
+    destroy: jest.fn(),
+  }),
+}));
+
+test('renders KinexAssist chat greeting', () => {
   render(<App />);
-  const linkElement = screen.getByText(/learn react/i);
-  expect(linkElement).toBeInTheDocument();
+  expect(screen.getByText(/how can i assist you with clinical data today/i)).toBeInTheDocument();
 });

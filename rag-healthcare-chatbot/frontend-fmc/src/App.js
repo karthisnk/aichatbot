@@ -1,4 +1,5 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import lottie from 'lottie-web';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkGemoji from 'remark-gemoji';
@@ -8,6 +9,8 @@ import {
   Mic, 
   Send, 
   History,
+  ThumbsDown,
+  ThumbsUp,
   Pencil,
   Trash2,
   Bell,
@@ -18,6 +21,7 @@ import {
   HelpCircle,
   GraduationCap,
   Search,
+  Square,
   ArrowDown,
   Users,
   Calendar,
@@ -85,11 +89,17 @@ const TherapyGapIcon = () => (
   </svg>
 );
 
+const FEEDBACK_LABELS = {
+  like: 'Like response',
+  dislike: 'Dislike response',
+};
+
 
 const App = () => {
   const CHAT_STORAGE_KEY = 'fmc-chat-threads-v1';
   const API_BASE_URL = process.env.REACT_APP_API_BASE_URL || 'http://localhost:8000';
   const FOLLOW_UP_PROMPT_HINT = 'would you like a detailed walkthrough from the documents';
+  const KNOWLEDGE_BASE_MISS_HINT = 'i could not find this in the knowledge base';
 
   const createThread = (title = 'New Chat') => ({
     id: `thread-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
@@ -123,7 +133,12 @@ const App = () => {
   const [queryScope, setQueryScope] = useState('auto');
   const [inputValue, setInputValue] = useState('');
   const [isSending, setIsSending] = useState(false);
+  const [feedbackLoadingById, setFeedbackLoadingById] = useState({});
+  const [failedImageUrls, setFailedImageUrls] = useState({});
   const [error, setError] = useState("");
+  const streamAbortControllerRef = useRef(null);
+  const introAnimationRef = useRef(null);
+  const chatScrollContainerRef = useRef(null);
 
   const activeThread = useMemo(
     () => chatThreads.find((thread) => thread.id === activeThreadId) || chatThreads[0] || null,
@@ -147,6 +162,44 @@ const App = () => {
       setActiveThreadId(chatThreads[0].id);
     }
   }, [chatThreads, activeThreadId]);
+
+  useEffect(() => () => {
+    streamAbortControllerRef.current?.abort();
+  }, []);
+
+  useEffect(() => {
+    if (!introAnimationRef.current) return undefined;
+
+    const animation = lottie.loadAnimation({
+      container: introAnimationRef.current,
+      renderer: 'svg',
+      loop: true,
+      autoplay: true,
+      path: `${process.env.PUBLIC_URL || ''}/live-chatbot.json`,
+      rendererSettings: {
+        preserveAspectRatio: 'xMidYMid meet',
+      },
+    });
+
+    return () => {
+      animation.destroy();
+    };
+  }, []);
+
+  useEffect(() => {
+    const container = chatScrollContainerRef.current;
+    if (!container) return;
+
+    if (typeof container.scrollTo === 'function') {
+      container.scrollTo({
+        top: container.scrollHeight,
+        behavior: 'smooth',
+      });
+      return;
+    }
+
+    container.scrollTop = container.scrollHeight;
+  }, [messages]);
 
   const updateThread = (threadId, updater) => {
     setChatThreads((prev) =>
@@ -225,6 +278,8 @@ const App = () => {
     if (!question || isSending || !activeThread) return;
 
     const threadId = activeThread.id;
+    const abortController = new AbortController();
+    streamAbortControllerRef.current = abortController;
 
     const userMsg = { id: `user-${Date.now()}`, text: question, sender: 'user' };
     const nextMessages = [...messages, userMsg];
@@ -235,6 +290,9 @@ const App = () => {
       id: botMsgId,
       text: '',
       sender: 'ai',
+      createdAt: new Date().toISOString(),
+      sourceQuestion: question,
+      feedback: null,
       isComplete: false,
       showImages: Boolean(options.showImages),
       sources: [],
@@ -269,6 +327,7 @@ const App = () => {
         headers: {
           "Content-Type": "application/json",
         },
+        signal: abortController.signal,
         body: JSON.stringify(payload),
       });
 
@@ -358,9 +417,27 @@ const App = () => {
          }
       }
     } catch (err) {
-      console.error(err);
-      setError(err.message || "Failed to communicate with the server");
+      if (err.name === 'AbortError') {
+        updateThread(threadId, (thread) => ({
+          ...thread,
+          messages: thread.messages.map((m) =>
+            m.id === botMsgId
+              ? {
+                  ...m,
+                  isComplete: true,
+                  stopped: true,
+                  text: m.text || 'Generation stopped.',
+                }
+              : m
+          ),
+        }));
+        setError('');
+      } else {
+        console.error(err);
+        setError(err.message || "Failed to communicate with the server");
+      }
     } finally {
+      streamAbortControllerRef.current = null;
       setIsSending(false);
     }
   };
@@ -369,10 +446,30 @@ const App = () => {
     await sendMessage(inputValue, { showImages: false });
   };
 
+  const handleSuggestedQuestion = async (question) => {
+    const nextQuestion = String(question || '').trim();
+    if (!nextQuestion) return;
+
+    setInputValue(nextQuestion);
+    await sendMessage(nextQuestion, { showImages: false });
+    setInputValue('');
+  };
+
+  const handleStopGeneration = () => {
+    streamAbortControllerRef.current?.abort();
+  };
+
   const shouldRenderFollowUpActions = (message) => {
     if (!message || message.sender !== 'ai' || !message.isComplete) return false;
     const text = String(message.text || '').toLowerCase();
+    if (text.includes(KNOWLEDGE_BASE_MISS_HINT)) return false;
     return text.includes(FOLLOW_UP_PROMPT_HINT);
+  };
+
+  const shouldOfferReferenceImages = (message) => {
+    const text = String(message?.text || '').toLowerCase();
+    if (text.includes(KNOWLEDGE_BASE_MISS_HINT)) return false;
+    return getRenderableImageSources(message).length > 0;
   };
 
   const handleFollowUpAction = async (message, action) => {
@@ -473,11 +570,86 @@ const App = () => {
     const raw = String(text || '').trim();
     if (!raw) return raw;
 
+    const withoutFollowUpPrompt = raw.replace(
+      /\n*\s*Would you like a detailed walkthrough from the documents,\s*or should I show reference images\?\s*$/i,
+      ''
+    );
+
     // Normalize inline bullet patterns into one-bullet-per-line rendering.
-    return raw
+    return withoutFollowUpPrompt
       .replace(/\s-\s+/g, '\n- ')
       .replace(/^\s*\n+/, '')
       .trim();
+  };
+
+  const setMessageFeedback = (threadId, messageId, feedback) => {
+    updateThread(threadId, (thread) => ({
+      ...thread,
+      messages: thread.messages.map((message) =>
+        message.id === messageId
+          ? {
+              ...message,
+              feedback,
+            }
+          : message
+      ),
+    }));
+  };
+
+  const submitFeedback = async (message, feedback) => {
+    if (!activeThread || !message?.sourceQuestion || message.feedback === feedback) {
+      return;
+    }
+
+    const threadId = activeThread.id;
+    const previousFeedback = message.feedback ?? null;
+
+    setMessageFeedback(threadId, message.id, feedback);
+    setFeedbackLoadingById((prev) => ({
+      ...prev,
+      [message.id]: true,
+    }));
+
+    try {
+      const response = await fetch(`${API_BASE_URL}/feedback/${feedback}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          message_id: message.id,
+          question: message.sourceQuestion,
+          answer: message.text,
+          created_at: message.createdAt,
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Failed to save ${feedback} feedback.`);
+      }
+    } catch (err) {
+      console.error(`Failed to save ${feedback} feedback`, err);
+      setMessageFeedback(threadId, message.id, previousFeedback);
+    } finally {
+      setFeedbackLoadingById((prev) => {
+        const next = { ...prev };
+        delete next[message.id];
+        return next;
+      });
+    }
+  };
+
+  const handleImageLoadError = (imageUrl) => {
+    if (!imageUrl) return;
+    setFailedImageUrls((prev) => {
+      if (prev[imageUrl]) {
+        return prev;
+      }
+      return {
+        ...prev,
+        [imageUrl]: true,
+      };
+    });
   };
 
   return (
@@ -486,10 +658,10 @@ const App = () => {
       <header className="bg-[#003DA5] h-14 flex items-center justify-between px-4 text-white shrink-0 z-50">
         <FreseniusLogo />
         <div className="flex items-center gap-6 text-[13px] mr-2">
-          <div className="flex items-center gap-1 cursor-pointer">
-            <span className="font-medium">Apollo</span>
-            <ChevronDown size={14} />
-          </div>
+            <div className="flex items-center gap-1 cursor-pointer">
+              <span className="font-medium">KinexAssist</span>
+              <ChevronDown size={14} />
+            </div>
           <div className="relative cursor-pointer">
             <Bell size={18} />
             <span className="absolute -top-0.5 -right-0.5 w-1.5 h-1.5 bg-red-500 rounded-full"></span>
@@ -566,7 +738,7 @@ const App = () => {
         <main className="flex-1 flex flex-col overflow-hidden bg-[#F5F6F8]">
           {currentPage === 'summary' ? (
             <div className="flex-1 overflow-auto p-8">
-              <h1 className="text-[26px] font-bold text-gray-800 mb-6">Apollo</h1>
+              <h1 className="text-[26px] font-bold text-gray-800 mb-6">KinexAssist</h1>
               
               <div className="flex gap-8 mb-6 border-b border-gray-200 px-1">
                 <div className="pb-3 border-b-[3px] border-[#003DA5] text-[#003DA5] font-bold text-sm cursor-pointer">Summary</div>
@@ -780,7 +952,10 @@ const App = () => {
                   </button>
                 </div>
 
-                <div className="flex-1 overflow-y-auto p-6 md:p-10 space-y-8 flex flex-col items-center">
+                <div
+                  ref={chatScrollContainerRef}
+                  className="flex-1 overflow-y-auto p-6 md:p-10 space-y-8 flex flex-col items-center"
+                >
                   {error ? (
                     <div className="w-full max-w-3xl rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-[13px] text-red-700">
                       {error}
@@ -788,6 +963,13 @@ const App = () => {
                   ) : null}
                   {messages.length === 0 ? (
                     <div className="mt-16 text-center space-y-4 max-w-xl">
+                      <div className="mx-auto mb-6 flex justify-center">
+                        <div
+                          ref={introAnimationRef}
+                          aria-hidden="true"
+                          className="h-[280px] w-[280px]"
+                        />
+                      </div>
                       <h2 className="text-[32px] font-bold text-gray-800">
                         Hello
                       </h2>
@@ -795,13 +977,20 @@ const App = () => {
                       
                       <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-12 text-left">
                         {[
-                          { title: "Summarize alerts", desc: "View clinical warnings from today." },
-                          { title: "Lab Results", desc: "Compare hemoglobin levels across clinics." }
+                          { title: "What is therapy gap?", desc: "Understand what a therapy gap means and why it matters." },
+                          { title: "How can I use the reports module?", desc: "Learn where reports are available and how to use them." },
+                          { title: "How to Review Treatments", desc: "See how to review and manage treatments in the portal." }
                         ].map((card, i) => (
-                          <div key={i} className="p-4 border border-gray-200 rounded-lg hover:bg-gray-50 cursor-pointer transition-all">
+                          <button
+                            key={i}
+                            type="button"
+                            onClick={() => handleSuggestedQuestion(card.title)}
+                            disabled={isSending}
+                            className={`w-full p-4 border border-gray-200 rounded-lg text-left transition-all ${isSending ? 'cursor-not-allowed opacity-60' : 'hover:bg-gray-50 cursor-pointer'}`}
+                          >
                             <p className="text-[13px] font-bold text-gray-800">{card.title}</p>
                             <p className="text-[12px] text-gray-500 mt-1">{card.desc}</p>
-                          </div>
+                          </button>
                         ))}
                       </div>
                     </div>
@@ -809,7 +998,9 @@ const App = () => {
                     <div className="w-full max-w-3xl space-y-6 pb-12">
                       {messages.map((m, index) => {
                         const imageSources = getRenderableImageSources(m);
+                        const availableImageSources = imageSources.filter((item) => !failedImageUrls[item.url]);
                         const shouldRenderImages = shouldRenderImagesForMessage(m, index, messages);
+                        const canOfferReferenceImages = shouldOfferReferenceImages(m);
                         return (
                         <div key={m.id} className={`flex gap-4 ${m.sender === 'user' ? 'justify-end' : ''}`}>
                           {m.sender === 'ai' && (
@@ -850,6 +1041,39 @@ const App = () => {
                             ) : (
                               <div className="whitespace-pre-line leading-relaxed">{m.text}</div>
                             )}
+                            {m.sender === 'ai' && m.isComplete && String(m.text || '').trim() ? (
+                              <div className="mt-3 flex items-center justify-between gap-3 border-t border-gray-100 pt-3">
+                                <span className="text-[11px] font-semibold uppercase tracking-[0.08em] text-gray-400">
+                                  Rate response
+                                </span>
+                                <div className="flex items-center gap-2">
+                                  {['like', 'dislike'].map((feedbackType) => {
+                                    const isActive = m.feedback === feedbackType;
+                                    const isLoading = Boolean(feedbackLoadingById[m.id]);
+                                    const baseClasses = isActive
+                                      ? feedbackType === 'like'
+                                        ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+                                        : 'border-red-200 bg-red-50 text-red-700'
+                                      : 'border-gray-200 bg-white text-gray-500 hover:border-blue-200 hover:text-[#003DA5]';
+
+                                    return (
+                                      <button
+                                        key={feedbackType}
+                                        type="button"
+                                        onClick={() => submitFeedback(m, feedbackType)}
+                                        disabled={isLoading}
+                                        aria-pressed={isActive}
+                                        aria-label={FEEDBACK_LABELS[feedbackType]}
+                                        title={FEEDBACK_LABELS[feedbackType]}
+                                        className={`inline-flex h-9 w-9 items-center justify-center rounded-full border transition ${baseClasses} ${isLoading ? 'cursor-not-allowed opacity-60' : ''}`}
+                                      >
+                                        {feedbackType === 'like' ? <ThumbsUp size={16} /> : <ThumbsDown size={16} />}
+                                      </button>
+                                    );
+                                  })}
+                                </div>
+                              </div>
+                            ) : null}
                             {shouldRenderFollowUpActions(m) ? (
                               <div className="mt-3 flex flex-wrap gap-2">
                                 <button
@@ -859,26 +1083,39 @@ const App = () => {
                                 >
                                   Detailed walkthrough
                                 </button>
-                                <button
-                                  onClick={() => handleFollowUpAction(m, 'images')}
-                                  disabled={isSending}
-                                  className={`rounded-full border px-3 py-1 text-[12px] font-semibold transition ${isSending ? 'border-gray-200 text-gray-400 cursor-not-allowed' : 'border-blue-200 bg-white text-[#003DA5] hover:bg-blue-50'}`}
-                                >
-                                  Show reference images
-                                </button>
+                                {canOfferReferenceImages ? (
+                                  <button
+                                    onClick={() => handleFollowUpAction(m, 'images')}
+                                    disabled={isSending}
+                                    className={`rounded-full border px-3 py-1 text-[12px] font-semibold transition ${isSending ? 'border-gray-200 text-gray-400 cursor-not-allowed' : 'border-blue-200 bg-white text-[#003DA5] hover:bg-blue-50'}`}
+                                  >
+                                    Show reference images
+                                  </button>
+                                ) : null}
                               </div>
                             ) : null}
-                            {m.sender === 'ai' && shouldRenderImages && imageSources.length ? (
+                            {m.sender === 'ai' && shouldRenderImages && availableImageSources.length ? (
                               <div className="mt-3 space-y-2">
-                                {imageSources.map((item) => (
+                                {availableImageSources.map((item) => (
                                   <div key={item.url} className="overflow-hidden rounded-lg border border-gray-200 bg-gray-50">
-                                    <img src={item.url} alt={item.section} className="w-full max-h-[360px] object-contain bg-white" loading="lazy" />
+                                    <img
+                                      src={item.url}
+                                      alt={item.section}
+                                      className="w-full max-h-[360px] object-contain bg-white"
+                                      loading="lazy"
+                                      onError={() => handleImageLoadError(item.url)}
+                                    />
                                     <div className="flex items-center justify-between px-2 py-1 text-[11px] text-gray-500">
                                       <span className="truncate pr-2">{item.section}</span>
                                       {item.page ? <span>Page {item.page}</span> : null}
                                     </div>
                                   </div>
                                 ))}
+                              </div>
+                            ) : null}
+                            {m.sender === 'ai' && shouldRenderImages && imageSources.length && !availableImageSources.length ? (
+                              <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-[12px] text-amber-800">
+                                Reference image unavailable.
                               </div>
                             ) : null}
                             {m.sender === 'ai' && Array.isArray(m.sources) && m.sources.length ? (
@@ -907,7 +1144,7 @@ const App = () => {
                     <textarea 
                       value={inputValue}
                       onChange={(e) => setInputValue(e.target.value)}
-                      placeholder="Ask Apollo..."
+                      placeholder="Ask KinexAssist..."
                       disabled={isSending}
                       rows={1}
                       className="flex-1 bg-transparent border-none focus:outline-none focus:ring-0 resize-none py-3 text-gray-800 text-[14px] leading-tight"
@@ -921,6 +1158,17 @@ const App = () => {
                     <div className="flex items-center gap-1 shrink-0">
                       <button disabled={isSending} className={`p-2 rounded transition-colors ${isSending ? 'text-gray-300 cursor-not-allowed' : 'text-gray-400 hover:text-gray-600'}`}><Mic size={20} /></button>
                       <button disabled={isSending} className={`p-2 rounded transition-colors ${isSending ? 'text-gray-300 cursor-not-allowed' : 'text-gray-400 hover:text-gray-600'}`}><Paperclip size={20} /></button>
+                      {isSending ? (
+                        <button
+                          onClick={handleStopGeneration}
+                          type="button"
+                          className="inline-flex items-center gap-1 rounded-full border border-red-200 bg-red-50 px-3 py-2 text-[12px] font-semibold text-red-700 transition hover:bg-red-100"
+                          title="Stop generating"
+                        >
+                          <Square size={14} />
+                          <span>Stop</span>
+                        </button>
+                      ) : null}
                       <button 
                         onClick={handleSendMessage}
                         disabled={!inputValue.trim() || isSending}
@@ -945,7 +1193,7 @@ const App = () => {
                 </div>
                 <div className="p-5 overflow-y-auto space-y-4">
                   {[
-                    { q: "What can Apollo help me with?", a: "Apollo can summarize clinical alerts, analyze patient lab trends, and answer questions about treatment histories." },
+                    { q: "What can KinexAssist help me with?", a: "KinexAssist can summarize clinical alerts, analyze patient lab trends, and answer questions about treatment histories." },
                     { q: "How do I filter treatments by date?", a: "Navigate to the Summary tab and use the 'By Date' toggle under the Alerts & Alarms panel." },
                     { q: "What does a 'Therapy Gap' mean?", a: "A therapy gap indicates a missed or incomplete dialysis session based on the patient's individual prescription." },
                     { q: "Can I export patient data?", a: "Yes, you can export compliance reports and alert histories from the Administration panel under 'Data Exports'." }
