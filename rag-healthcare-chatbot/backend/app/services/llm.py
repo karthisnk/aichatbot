@@ -29,11 +29,11 @@ class LLM:
             payload["options"].update(options)
         return payload
 
-    def generate(self, prompt):
+    def generate(self, prompt, options=None):
         try:
             response = self.__class__._session.post(
                 OLLAMA_URL,
-                json=self._payload(prompt, stream=False),
+                json=self._payload(prompt, stream=False, options=options),
                 timeout=LLM_TIMEOUT_SECONDS,
             )
             response.raise_for_status()
@@ -41,11 +41,11 @@ class LLM:
         except requests.RequestException as exc:
             raise RuntimeError("Failed to generate a response from the LLM service.") from exc
 
-    def stream_generate(self, prompt):
+    def stream_generate(self, prompt, options=None):
         try:
             with self.__class__._session.post(
                 OLLAMA_URL,
-                json=self._payload(prompt, stream=True),
+                json=self._payload(prompt, stream=True, options=options),
                 timeout=LLM_TIMEOUT_SECONDS,
                 stream=True,
             ) as response:

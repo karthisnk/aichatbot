@@ -10,6 +10,17 @@ from app.services.embedder import Embedder
 
 class VectorStore:
     _chunk_cache = {}
+    _image_query_terms = {
+        "image",
+        "images",
+        "figure",
+        "fig",
+        "screenshot",
+        "screen",
+        "card",
+        "diagram",
+        "chart",
+    }
 
     def __init__(self):
         self.client = get_chroma_client()
@@ -67,6 +78,7 @@ class VectorStore:
             if metadata:
                 item.update(metadata)
             item["collection"] = collection_name
+            self._enrich_image_metadata(item, collection_name)
             item["_semantic_rank"] = index
             formatted_results.append(item)
 
@@ -95,7 +107,7 @@ class VectorStore:
                 "collection": collection_name,
                 "_semantic_rank": 10_000 + index,
             }
-            item.update(self._build_chunk_metadata(chunk))
+            item.update(self._build_chunk_metadata(chunk, collection_name=collection_name))
             score = self._score_result(query_text, item)
             if score <= 0:
                 continue
@@ -148,7 +160,7 @@ class VectorStore:
             parts.append("Keywords: " + ", ".join(str(keyword) for keyword in keywords))
         return "\n\n".join(part for part in parts if part)
 
-    def _build_chunk_metadata(self, chunk):
+    def _build_chunk_metadata(self, chunk, collection_name):
         metadata = {
             "app": str(chunk.get("app") or ""),
             "domain": str(chunk.get("domain") or ""),
@@ -159,10 +171,48 @@ class VectorStore:
             metadata["page"] = int(chunk["page"])
         if chunk.get("image_path") is not None:
             metadata["image_path"] = str(chunk.get("image_path"))
+            self._enrich_image_metadata(metadata, collection_name)
         keywords = chunk.get("keywords") or []
         if keywords:
             metadata["keywords"] = ", ".join(str(keyword) for keyword in keywords)
         return metadata
+
+    def _enrich_image_metadata(self, item, collection_name):
+        raw_path = str(item.get("image_path") or "").strip()
+        if not raw_path:
+            return
+
+        relative_path = self._to_relative_image_path(raw_path, collection_name)
+        if not relative_path:
+            return
+
+        item["image_path"] = relative_path
+        item["image_url"] = f"/kb-images/{relative_path}"
+
+    def _to_relative_image_path(self, raw_path, collection_name):
+        posix = raw_path.replace("\\", "/").strip()
+        if not posix:
+            return ""
+
+        if "/processed/" in posix:
+            relative = posix.split("/processed/", 1)[1].lstrip("/")
+        elif "/images/" in posix:
+            file_name = posix.rsplit("/", 1)[-1]
+            relative = f"{collection_name}/images/{file_name}" if file_name else ""
+        else:
+            file_name = posix.rsplit("/", 1)[-1]
+            relative = f"{collection_name}/images/{file_name}" if file_name else ""
+
+        if not relative:
+            return ""
+
+        parts = [part for part in relative.split("/") if part not in {"", ".", ".."}]
+        if len(parts) < 3:
+            return ""
+        if parts[1] != "images":
+            return ""
+
+        return "/".join(parts)
 
     def _merge_results(self, semantic_results, lexical_results):
         merged = []
@@ -226,6 +276,9 @@ class VectorStore:
             if "mfa" in query_terms or "authentication" in query_terms:
                 score += 6
 
+        if chunk_type == "image" and query_terms.intersection(self._image_query_terms):
+            score += 14
+
         return score
 
     def _expand_query_terms(self, query_text):
@@ -242,6 +295,14 @@ class VectorStore:
             "forgot password",
             "mfa",
             "authentication",
+            "figure",
+            "fig",
+            "image",
+            "screenshot",
+            "screen",
+            "card",
+            "diagram",
+            "chart",
         ]:
             if phrase in normalized:
                 terms.add(phrase)

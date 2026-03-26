@@ -1,6 +1,7 @@
 import json
 import threading
 from collections import OrderedDict
+import re
 
 from app.config import ANSWER_CACHE_SIZE
 from app.rag.prompt import PromptBuilder
@@ -11,6 +12,14 @@ from app.services.llm import LLM
 class RAGPipeline:
     _answer_cache = OrderedDict()
     _cache_lock = threading.Lock()
+    _follow_up_prompt = (
+        "Would you like a detailed walkthrough from the documents, "
+        "or should I show reference images?"
+    )
+    _detailed_top_k = 6
+    _detailed_prompt_max_chunks = 5
+    _detailed_chunk_char_limit = 900
+    _detailed_num_predict = 520
 
     def __init__(self):
         self.retriever = Retriever()
@@ -23,17 +32,24 @@ class RAGPipeline:
 
     def run(self, query, history=None, where=None):
         history = history or []
+        detailed_requested = self._query_requests_detailed(query)
         cache_key = self._build_cache_key(query, history, where)
         cached = self._get_cached_answer(cache_key)
         if cached is not None:
             return cached
 
-        retrieval_query, route, chunks = self._prepare_retrieval(query, history, where)
+        retrieval_query, route, chunks = self._prepare_retrieval(
+            query,
+            history,
+            where,
+            detailed=detailed_requested,
+        )
 
         if not chunks:
             result = {
                 "answer": "I could not find relevant information in the knowledge base.",
                 "sources": [],
+                "steps": [],
                 "collection": route["collection"],
                 "app": route["app"],
                 "routing": route,
@@ -41,11 +57,35 @@ class RAGPipeline:
             self._store_cached_answer(cache_key, result)
             return result
 
-        prompt = self.prompt_builder.build(query, chunks, history=history)
-        answer = self.llm.generate(prompt)
+        if self._query_requests_visual(query):
+            answer = self._build_chunk_fallback_answer(query, chunks)
+            answer = self._append_follow_up_prompt(answer)
+            result = {
+                "answer": answer,
+                "sources": chunks,
+                "steps": [],
+                "collection": route["collection"],
+                "app": route["app"],
+                "routing": route,
+            }
+            self._store_cached_answer(cache_key, result)
+            return result
+
+        prompt = self.prompt_builder.build(
+            query,
+            chunks,
+            history=history,
+            detailed=detailed_requested,
+            max_chunks=self._detailed_prompt_max_chunks if detailed_requested else None,
+            chunk_char_limit=self._detailed_chunk_char_limit if detailed_requested else None,
+        )
+        llm_options = {"num_predict": self._detailed_num_predict} if detailed_requested else None
+        answer = self.llm.generate(prompt, options=llm_options)
+        answer = self._finalize_answer(query, answer, chunks)
         result = {
             "answer": answer,
             "sources": chunks,
+            "steps": [],
             "collection": route["collection"],
             "app": route["app"],
             "routing": route,
@@ -55,6 +95,7 @@ class RAGPipeline:
 
     def stream(self, query, history=None, where=None):
         history = history or []
+        detailed_requested = self._query_requests_detailed(query)
         cache_key = self._build_cache_key(query, history, where)
         cached = self._get_cached_answer(cache_key)
         if cached is not None:
@@ -64,17 +105,24 @@ class RAGPipeline:
                 "app": cached["app"],
                 "routing": cached["routing"],
                 "sources": cached["sources"],
+                "steps": [],
             }
             yield {"type": "token", "text": cached["answer"]}
             yield {"type": "done"}
             return
 
-        retrieval_query, route, chunks = self._prepare_retrieval(query, history, where)
+        retrieval_query, route, chunks = self._prepare_retrieval(
+            query,
+            history,
+            where,
+            detailed=detailed_requested,
+        )
 
         if not chunks:
             result = {
                 "answer": "I could not find this in the knowledge base. Please check with the L3 administration team.",
                 "sources": [],
+                "steps": [],
                 "collection": route["collection"],
                 "app": route["app"],
                 "routing": route,
@@ -86,6 +134,7 @@ class RAGPipeline:
                 "app": route["app"],
                 "routing": route,
                 "sources": [],
+                "steps": [],
             }
             yield {
                 "type": "token",
@@ -94,25 +143,71 @@ class RAGPipeline:
             yield {"type": "done"}
             return
 
-        prompt = self.prompt_builder.build(query, chunks, history=history)
+        if self._query_requests_visual(query):
+            answer = self._build_chunk_fallback_answer(query, chunks)
+            answer = self._append_follow_up_prompt(answer)
+            self._store_cached_answer(
+                cache_key,
+                {
+                    "answer": answer,
+                    "sources": chunks,
+                    "steps": [],
+                    "collection": route["collection"],
+                    "app": route["app"],
+                    "routing": route,
+                },
+            )
+            yield {
+                "type": "meta",
+                "collection": route["collection"],
+                "app": route["app"],
+                "routing": route,
+                "sources": chunks,
+                "steps": [],
+            }
+            yield {"type": "token", "text": answer}
+            yield {"type": "done"}
+            return
+
+        prompt = self.prompt_builder.build(
+            query,
+            chunks,
+            history=history,
+            detailed=detailed_requested,
+            max_chunks=self._detailed_prompt_max_chunks if detailed_requested else None,
+            chunk_char_limit=self._detailed_chunk_char_limit if detailed_requested else None,
+        )
+        llm_options = {"num_predict": self._detailed_num_predict} if detailed_requested else None
         yield {
             "type": "meta",
             "collection": route["collection"],
             "app": route["app"],
             "routing": route,
             "sources": chunks,
+            "steps": [],
         }
 
         answer_parts = []
-        for text in self.llm.stream_generate(prompt):
+        for text in self.llm.stream_generate(prompt, options=llm_options):
             answer_parts.append(text)
             yield {"type": "token", "text": text}
+
+        raw_answer = "".join(answer_parts)
+        final_answer = self._finalize_answer(query, raw_answer, chunks)
+
+        if final_answer.startswith(raw_answer):
+            suffix = final_answer[len(raw_answer):]
+            if suffix:
+                yield {"type": "token", "text": suffix}
+        elif final_answer != raw_answer:
+            yield {"type": "token", "text": "\n\n" + self._follow_up_prompt}
 
         self._store_cached_answer(
             cache_key,
             {
-                "answer": "".join(answer_parts),
+                "answer": final_answer,
                 "sources": chunks,
+                "steps": [],
                 "collection": route["collection"],
                 "app": route["app"],
                 "routing": route,
@@ -120,12 +215,14 @@ class RAGPipeline:
         )
         yield {"type": "done"}
 
-    def _prepare_retrieval(self, query, history, where):
+    def _prepare_retrieval(self, query, history, where, detailed=False):
         retrieval_query = self._build_retrieval_query(query, history)
+        top_k = self._detailed_top_k if detailed else None
         route, chunks = self.retriever.retrieve(
             retrieval_query,
             history=history,
             where=where,
+            top_k=top_k,
         )
         return retrieval_query, route, chunks
 
@@ -173,3 +270,72 @@ class RAGPipeline:
             cache[key] = dict(value) if isinstance(value, dict) else value
             while len(cache) > ANSWER_CACHE_SIZE:
                 cache.popitem(last=False)
+
+    def _finalize_answer(self, query, answer, chunks):
+        normalized = self._normalize_text(answer)
+        if chunks and (
+            "could not find this in the knowledge base" in normalized
+            or "please check with the l3 administration team" in normalized
+        ):
+            return self._build_chunk_fallback_answer(query, chunks)
+
+        return self._append_follow_up_prompt(answer)
+
+    def _build_chunk_fallback_answer(self, query, chunks):
+        primary = chunks[0]
+        section = primary.get("section") or "Relevant section"
+        page = primary.get("page")
+        text = self._clean_fallback_text(primary.get("text") or "")
+
+        if self._query_requests_visual(query) and page:
+            lead = f"- The most relevant section is **{section}** on page {page}."
+        elif page:
+            lead = f"- The most relevant section is **{section}** on page {page}."
+        else:
+            lead = f"- The most relevant section is **{section}**."
+
+        details = text[:520].strip()
+        if len(text) > 520:
+            details = details.rstrip() + "..."
+
+        if not details:
+            return lead
+
+        return f"{lead}\n- {details}"
+
+    def _clean_fallback_text(self, text):
+        cleaned = str(text or "").strip()
+        cleaned = re.sub(r"\s+", " ", cleaned)
+        cleaned = re.sub(r"\bFigure\s+\d+(?:[-.]\d+)?\s*\([A-Z]\)", "", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"\bsee the [^.]+\.", "", cleaned, flags=re.IGNORECASE)
+        return cleaned.strip(" .")
+
+    def _query_requests_visual(self, query):
+        normalized = self._normalize_text(query)
+        return any(term in normalized for term in ("figure", "show", "image", "screenshot", "card"))
+
+    def _query_requests_detailed(self, query):
+        normalized = self._normalize_text(query)
+        detailed_terms = (
+            "detailed",
+            "detail",
+            "walkthrough",
+            "step by step",
+            "step-by-step",
+            "in detail",
+            "all information",
+            "all details",
+            "from the documents",
+        )
+        return any(term in normalized for term in detailed_terms)
+
+    def _append_follow_up_prompt(self, answer):
+        cleaned = str(answer or "").strip()
+        if not cleaned:
+            return cleaned
+
+        normalized = self._normalize_text(cleaned)
+        if "detailed walkthrough" in normalized and "reference images" in normalized:
+            return cleaned
+
+        return f"{cleaned}\n\n{self._follow_up_prompt}"

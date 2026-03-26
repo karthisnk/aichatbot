@@ -16,9 +16,9 @@ class Retriever:
         self.store = VectorStore()
         self.router = ApplicationRouter()
 
-    def retrieve(self, query, history=None, where=None):
+    def retrieve(self, query, history=None, where=None, top_k=None):
         history = history or []
-        cache_key = self._build_cache_key(query, history, where)
+        cache_key = self._build_cache_key(query, history, where, top_k)
         cached = self._get_cached_result(cache_key)
         if cached is not None:
             return cached
@@ -27,10 +27,13 @@ class Retriever:
         metadata_filters = dict(where or {})
         metadata_filters.pop("app", None)
         metadata_filters.pop("collection", None)
+        k = int(top_k or TOP_K)
+        if k < 1:
+            k = TOP_K
         chunks = self.store.search(
             query,
             collection_name=route["collection"],
-            k=TOP_K,
+            k=k,
             where=metadata_filters,
         )
         result = (route, chunks)
@@ -72,14 +75,14 @@ class Retriever:
 
         return None
 
-    def _build_cache_key(self, query, history, where):
+    def _build_cache_key(self, query, history, where, top_k=None):
         history_text = " || ".join(
             f"{(turn.get('role') or '').strip().lower()}:{self._normalize_text(turn.get('text') or '')}"
             for turn in history[-4:]
             if (turn.get("text") or "").strip()
         )
         where_text = json.dumps(where or {}, sort_keys=True, ensure_ascii=False)
-        return f"{self._normalize_text(query)}::{history_text}::{where_text}"
+        return f"{self._normalize_text(query)}::{history_text}::{where_text}::k={int(top_k or TOP_K)}"
 
     def _normalize_text(self, value):
         return " ".join(str(value or "").strip().lower().split())
